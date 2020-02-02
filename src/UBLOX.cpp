@@ -16,25 +16,24 @@ BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR P
 NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
 DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
-v1.0.2
+v1.0.3
 Chris O.
-2018-03-01 Changes:
-Identify the packet Class in receive message
-Identify the packet Message ID in receive message
-Identify the packet 16Bit Message payloadSize
-Fixed the checksum calculations, now it's based on*the*received message payload.
-This fixes the compatibility issues between NEO-M8 and NEO-M7-6 GPS series.
-2018-03-01 Addition:
+2018-03-29
+Supported Navigation IDs:
+UBX-NAV-PVT ---- (0x01 0x07) Navigation Position Velocity Time Solution
 UBX-NAV-POSLLH - (0x01 0x02) Geodetic Position Solution
-2018-03-20
 UBX-NAV-ATT ---- (0x01 0x05) Attitude Solution
-/---  High level commands, for the user ---/
+/---  High level Commands, for the user ---/
 NOTE: command(bool) == (true)Print Message Acknowledged on USB Serial Monitor
+begin(Baud)                       // Starting communication with the GPS
 end();                            // Disables Teensy serial communication, to re-enable, call begin(Baud)
 Poll_CFG_Port1(bool);             // Polls the configuration for one I/O Port, I/O Target 0x01=UART1
 Poll_NAV_PVT();                   // Polls UBX-NAV-PVT    (0x01 0x07) Navigation Position Velocity Time Solution
 Poll_NAV_POSLLH();                // Polls UBX-NAV-POSLLH (0x01 0x02) Geodetic Position Solution
 Poll_NAV_ATT();                   // Polls UBX-NAV-ATT    (0x01 0x05) Attitude Solution
+Poll_MON_IO(bool);                // Polls UBX-MON-IO (0x0A 0x02) I/O Subsystem Status
+Poll_MON_VER(bool);               // Polls UBX-MON-VER (0x0A 0x04) Receiver/Software Version
+Poll_CFG_TP5(bool);               // Polls CFG-TP5        (0x06 0x31) Poll Time Pulse 0 Parameters
 ### Periodic Auto Update ON,OFF Command ###
 Ena_NAV_PVT(bool);                // Enable periodic auto update NAV_PVT
 Dis_NAV_PVT(bool);                // Disable periodic auto update NAV_PVT
@@ -48,6 +47,8 @@ Dis_all_NMEA_Child_MSGs(bool);    // Disable All NMEA Child Messages Command
 SetGPSbaud(uint32_t baud, bool)   // Set UBLOX GPS Port Configuration Baud rate
 SetNAV5(uint8_t dynModel, bool)   // Set Dynamic platform model Navigation Engine Settings (0:portable, 3:pedestrian, Etc)
 SetRATE(uint16_t measRate, bool)  // Set Navigation/Measurement Rate Settings (100ms=10.00Hz, 200ms=5.00Hz, 1000ms=1.00Hz, Etc)
+SetCFG_TP5(uint32_t FreqLocked, double DutyLocked, uint16_t antCableDelay, bool printACK); // UBX-CFG-TP5 (0x06 0x31) Time Pulse 0 Parameters
+Ena_Dis_MON_IO(bool En~Di, bool) // UBX-MON-IO (0x0A 0x02) Ena/Dis periodic auto update I/O Subsystem Status, bytes(received, sent), parity , framing , overrun)
 */
 /* Note: Acknowledgment
 When messages from the Class CFG are sent to the receiver, the receiver will send an Acknowledge (ACK-ACK)
@@ -135,7 +136,6 @@ void UBLOX::begin(int baud)
   // begin the serial port for uBlox
   _port -> begin(baud);
   delay(50); // wait for a bit, need for commands execution @ cold boot
-  // check if the hardware serial port has room for outgoing bytes to TX buffer
   while (38 > _port -> availableForWrite())
   {
   }
@@ -150,8 +150,12 @@ void UBLOX::end()
   _port -> end(); // Disables serial communication
 }
 
+// # experimental Bridge between u-center and teensy UBLOX #
+// />void UBLOX::USE_Ucenter(bool uc) {
+// />  _use_ucenter = uc;
+// />}
 // Generate the uBlox command configuration
-void UBLOX::writeCommand(uint8_t CLASS, uint8_t ID, uint8_t PayloadLen0, uint8_t PayloadLen1, uint8_t Identifier, uint8_t reserved0, uint8_t Par0, uint8_t Par1, uint8_t Par2, uint8_t Par3) const
+void UBLOX::writeCommand(uint8_t CLASS, uint8_t ID, uint8_t PayloadLen0, uint8_t PayloadLen1, uint8_t Identifier, uint8_t reserved0, uint8_t Par0, uint8_t Par1, uint8_t Par2, uint8_t Par3, uint32_t P32t0, uint32_t P32t1) const
 {
   const uint8_t HeaderLength = 2; // 2 synchronization characters: 0xB5 0x62.
   const uint8_t CLASSandID = 2; // 1-byte Message Class field and 1-byte Message ID field
@@ -164,134 +168,193 @@ void UBLOX::writeCommand(uint8_t CLASS, uint8_t ID, uint8_t PayloadLen0, uint8_t
   switch (CLASS)
   {
     // 
-    case 0x00:
-      case 0x01:// NAV 0x01
-      case 0x02:// RXM 0x02
-      case 0x04:// INF 0x04
-      case 0x05:// ACK 0x05
-      Serial.println("Not Supported COMMAND CLASS:"), Serial.println(CLASS, HEX);
-      break;
-      case 0x06:// CLASS CFG 0x06
-      // ID CFG-PRT (0x00)
-      if (ID == 0x00)
+    case 0x01:// NAV 0x01
+    case 0x02:// RXM 0x02
+    case 0x04:// INF 0x04
+    case 0x05:// ACK 0x05
+    Serial.println("Not Supported COMMAND CLASS:"), Serial.println(CLASS, HEX);
+    break;
+    case 0x06:// CLASS CFG 0x06
+    // ID CFG-PRT (0x00)
+    if (ID == 0x00)
+    {
+      // ID CFG-PRT (0x06 0x00) Port Configuration
+      if (Bit16PayloadLen == 0x14)
       {
-        // ID CFG-PRT (0x06 0x00) Port Configuration
-        // SET   9600_CFG_PRT[28] = {0xB5, 0x62, 0x06, 0x00, 0x14, 0x00, 0x01, 0x00, 0x00, 0x00, 0xC0, 0x08, 0x00, 0x00, 0x80, 0x25, 0x00, 0x00, 0x07, 0x00, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x92, 0xB5};
-        // SET 460800_CFG_PRT[28] = {0xB5, 0x62, 0x06, 0x00, 0x14, 0x00, 0x01, 0x00, 0x00, 0x00, 0xD0, 0x08, 0x00, 0x00, 0x00, 0x08, 0x07, 0x00, 0x07, 0x00, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0C, 0xBC};
-        // |HEADER    |CLASS| ID  |16-Bit LOAD| --[0]---[1]---[2]---[3]--m[4]---[5]---[6]---[7]->b[8]--[9]--[10]--[11]<--[12]--[13]--[14]--[15]--[16]--[17]--[18]--[19]|--- CRC----|
-        // |          |6 CFG|0 PRT|0x14 =DEC20| ^------------------ packet - payload ----------->  baudRate uint32_t  <----------------------------------------------^ |           |
-        if (Bit16PayloadLen == 0x14)
+        // Length (Bytes) DEC 20
+        if (Identifier == 0x01)
         {
-          // Length (Bytes) DEC 20
-          if (Identifier == 0x01)
+          // Port Identifier Number uart1
+          DATA[0] = 0x01; // 0 U1 - portID
+          DATA[1] = 0x00; // 1 U1 - reserved1
+          DATA[2] = 0x00; // 2 X2 - txReady
+          DATA[3] = 0x00; // X2 - txReady
+          uint32_t GPSBaud = (((Par0 << 24) | (Par1 << 16)) | (Par2 << 8)) | Par3; // Combining
+          if (GPSBaud == 9600)
           {
-            // Port Identifier Number uart1
-            DATA[0] = 0x01; // 0 U1 - portID
-            DATA[1] = 0x00; // 1 U1 - reserved1
-            DATA[2] = 0x00; // 2 X2 - txReady
-            DATA[3] = 0x00; // X2 - txReady
-            uint32_t GPSBaud = (((Par0 << 24) | (Par1 << 16)) | (Par2 << 8)) | Par3; // Combining
-            if (GPSBaud == 9600)
-            {
-              // 4 X4 - mode - A bit mask describing the UART mode
-              DATA[4] = 0xC0; // @9600=0xC0,   *b11000000‬
-            }
-            else
-            {
-              // NOT SURE HERE, ISSUE UBX-CFG-PRT (0x06 0x00) Bit Field mode ACCESSING UNDOCUMENTED BIT
-              DATA[4] = 0xD0; // @460800=0xD0, *b11010000‬ U-CENTER ISSUE ?
-            }
-            DATA[5] = 0x08; // X4 - mode
-            DATA[6] = 0x00; // X4 - mode
-            DATA[7] = 0x00; // X4 - mode
-            DATA[8] = Par0; // 8 U4 - 32bit baudRate Bits/s Baud rate in bits/second
-            DATA[9] = Par1; // >baudRate uint32_t< DATA [8]-[9]-[10]-[11]
-            DATA[10] = Par2; // Little Endian:     Hex:  00--08---07---00
-            DATA[11] = Par3; // Big Endian:        Hex:  00--07---08---00 Decimal = **460800‬baud
-            DATA[12] = 0x07; // 12 X2 - inProtoMask
-            DATA[13] = 0x00; // X2 - inProtoMask
-            DATA[14] = 0x03; // 14 X2 - outProtoMask
-            DATA[15] = 0x00; // X2 - outProtoMask
-            DATA[16] = 0x00; // 16 X2 - flags
-            DATA[17] = 0x00; // X2 - flags
-            DATA[18] = 0x00; // 18 U1 - reserved1
-            DATA[19] = 0x00; // 19 U1 - reserved2
+            // 4 X4 - mode - A bit mask describing the UART mode
+            DATA[4] = 0xC0; // @9600=0xC0,   *b11000000‬
           }
+          else
+          {
+            // NOT SURE HERE, ISSUE UBX-CFG-PRT (0x06 0x00) Bit Field mode ACCESSING UNDOCUMENTED BIT
+            DATA[4] = 0xD0; // @460800=0xD0, *b11010000‬ U-CENTER ISSUE ?
+          }
+          DATA[5] = 0x08; // X4 - mode
+          DATA[6] = 0x00; // X4 - mode
+          DATA[7] = 0x00; // X4 - mode
+          DATA[8] = Par0; // 8 U4 - 32bit baudRate Bits/s
+          DATA[9] = Par1; // >baudRate uint32_t< DATA [8]-[9]-[10]-[11]
+          DATA[10] = Par2; // Little Endian:     Hex:  00--08---07---00
+          DATA[11] = Par3; // Big Endian:        Hex:  00--07---08---00 Decimal = **460800‬baud
+          DATA[12] = 0x07; // 12 X2 - inProtoMask
+          DATA[13] = 0x00; // X2 - inProtoMask
+          DATA[14] = 0x03; // 14 X2 - outProtoMask
+          DATA[15] = 0x00; // X2 - outProtoMask
+          DATA[16] = 0x00; // 16 X2 - flags
+          DATA[17] = 0x00; // X2 - flags
+          DATA[18] = 0x00; // 18 U1 - reserved1
+          DATA[19] = 0x00; // 19 U1 - reserved2
         }
       }
-      // end UBX-CFG-PRT (0x06 0x00)
-      // ID CFG-RATE (0x08)
-      if (ID == 0x08)
+    }
+    // end UBX-CFG-PRT (0x06 0x00)
+    if (ID == 0x01)
+    {
+      // UBX-CFG-MSG (0x06 0x01)
+      // 0xB5 0x62 0x06 0x01 Length 3, Set periodic auto update message rate configuration for the current port
+      if (Bit16PayloadLen == 0x03)
       {
-        // ID CFG-RATE (0x06 0x08) Navigation/Measurement Rate Settings, e.g. 100ms => 10Hz, 1000ms => 1Hz, 10000ms => 0.1Hz
-        if (Bit16PayloadLen == 0x06)
-        {
-          // Length (Bytes) DEC 6
-          DATA[0] = Identifier; // 0  U2 - measRate ms
-          DATA[1] = reserved0; // U2 - measRate
-          DATA[2] = Par0; // 2  U2 - navRate
-          DATA[3] = Par1; // U2 - navRate
-          DATA[4] = Par2; // 4  U2 - timeRef
-          DATA[5] = Par3; // U2 - timeRef
-        }
+        // Length (Bytes) DEC 3
+        DATA[0] = Identifier; // 0 U1 - msgClass - Message Class
+        DATA[1] = reserved0; // 1 U1 - msgID - Message Identifier
+        DATA[2] = Par0; // 2 U1 - rate - Send periodic auto update on-off rate on current Port
       }
-      // end UBX-CFG-RATE (0x06 0x08)
-      // ID CFG-NAV5 (0x24)
-      if (ID == 0x24)
+    }
+    // end UBX-CFG-MSG (0x06 0x01)
+    // ID CFG-RATE (0x08)
+    if (ID == 0x08)
+    {
+      // ID CFG-RATE (0x06 0x08) Navigation/Measurement Rate Settings, e.g. 100ms => 10Hz, 1000ms => 1Hz, 10000ms => 0.1Hz
+      if (Bit16PayloadLen == 0x06)
       {
-        // ID CFG-NAV5 (0x06 0x24) Navigation Engine Settings
-        if (Bit16PayloadLen == 0x24)
-        {
-          // Length (Bytes) DEC 36
-          DATA[0] = Identifier; // 0  X2 - mask
-          DATA[1] = reserved0; // X2 - mask
-          DATA[2] = Par0; // 2  U1 - dynModel
-          DATA[3] = 0x00; // 3  U1 - fixMode
-          DATA[4] = 0x00; // 4  I4 - fixedAlt, Scaling 0.01
-          DATA[5] = 0x00; // I4 - fixedAlt
-          DATA[6] = 0x00; // I4 - fixedAlt
-          DATA[7] = 0x00; // I4 - fixedAlt
-          DATA[8] = 0x00; // 8  U4 - fixedAltVar, Scaling 0.0001
-          DATA[9] = 0x00; // U4 - fixedAltVar
-          DATA[10] = 0x00; // U4 - fixedAltVar
-          DATA[11] = 0x00; // U4 - fixedAltVar
-          DATA[12] = 0x00; // 12 I1 - minElev
-          DATA[13] = 0x00; // 13 U1 - drLimit
-          DATA[14] = 0x00; // 14 U2 - pDop, Scaling 0.1
-          DATA[15] = 0x00; // U2 - pDop
-          DATA[16] = 0x00; // 16 U2 - tDop, Scaling 0.1
-          DATA[17] = 0x00; // U2 - tDop
-          DATA[18] = 0x00; // 18 U2 - pAcc
-          DATA[19] = 0x00; // U2 - pAcc
-          DATA[20] = 0x00; // 20 U2 - tAcc
-          DATA[21] = 0x00; // U2 - tAcc
-          DATA[22] = 0x00; // 22 U1 - staticHoldThresh
-          DATA[23] = 0x00; // 23 U1 - dgnssTimeout
-          DATA[24] = 0x00; // 24 U1 - cnoThreshNumSVs
-          DATA[25] = 0x00; // 25 U1 - cnoThresh
-          DATA[26] = 0x00; // 26 U1[2] - reserved1
-          DATA[27] = 0x00; // U1 -    reserved1
-          DATA[28] = 0x00; // 28 U2 - staticHoldMaxDist
-          DATA[29] = 0x00; // U2 - staticHoldMaxDist
-          DATA[30] = 0x00; // 30 U1 - utcStandard
-          DATA[31] = 0x00; // 31 U1[5] - reserved2
-          DATA[32] = 0x00; // U1 -    reserved2
-          DATA[33] = 0x00; // U1 -    reserved2
-          DATA[34] = 0x00; // U1 -    reserved2
-          DATA[35] = 0x00; // U1 -    reserved2
-        }
+        // Length (Bytes) DEC 6
+        DATA[0] = Identifier; // 0  U2 - measRate ms
+        DATA[1] = reserved0; // U2 - measRate
+        DATA[2] = Par0; // 2  U2 - navRate
+        DATA[3] = Par1; // U2 - navRate
+        DATA[4] = Par2; // 4  U2 - timeRef
+        DATA[5] = Par3; // U2 - timeRef
       }
-      // end UBX-CFG-NAV5 (0x06 0x24)
-      break;
-      case 0x0A:// MON 0x0A
-      case 0x0B:// AID 0x0B
-      case 0x0D:// TIM 0x0D
-      case 0x10:// ESF 0x10
-      case 0x13:// MGA 0x13
-      case 0x21:// LOG 0x21
-      case 0x27:// SEC 0x27
-      case 0x28:// HNR 0x28
-      // break;
+    }
+    // end UBX-CFG-RATE (0x06 0x08)
+    // ID CFG-NAV5 (0x24)
+    if (ID == 0x24)
+    {
+      // ID CFG-NAV5 (0x06 0x24) Navigation Engine Settings
+      if (Bit16PayloadLen == 0x24)
+      {
+        // Length (Bytes) DEC 36
+        DATA[0] = Identifier; // 0  X2 - mask
+        DATA[1] = reserved0; // X2 - mask
+        DATA[2] = Par0; // 2  U1 - dynModel
+        DATA[3] = 0x00; // 3  U1 - fixMode
+        DATA[4] = 0x00; // 4  I4 - fixedAlt, Scaling 0.01
+        DATA[5] = 0x00; // I4 - fixedAlt
+        DATA[6] = 0x00; // I4 - fixedAlt
+        DATA[7] = 0x00; // I4 - fixedAlt
+        DATA[8] = 0x00; // 8  U4 - fixedAltVar, Scaling 0.0001
+        DATA[9] = 0x00; // U4 - fixedAltVar
+        DATA[10] = 0x00; // U4 - fixedAltVar
+        DATA[11] = 0x00; // U4 - fixedAltVar
+        DATA[12] = 0x00; // 12 I1 - minElev
+        DATA[13] = 0x00; // 13 U1 - drLimit
+        DATA[14] = 0x00; // 14 U2 - pDop, Scaling 0.1
+        DATA[15] = 0x00; // U2 - pDop
+        DATA[16] = 0x00; // 16 U2 - tDop, Scaling 0.1
+        DATA[17] = 0x00; // U2 - tDop
+        DATA[18] = 0x00; // 18 U2 - pAcc
+        DATA[19] = 0x00; // U2 - pAcc
+        DATA[20] = 0x00; // 20 U2 - tAcc
+        DATA[21] = 0x00; // U2 - tAcc
+        DATA[22] = 0x00; // 22 U1 - staticHoldThresh
+        DATA[23] = 0x00; // 23 U1 - dgnssTimeout
+        DATA[24] = 0x00; // 24 U1 - cnoThreshNumSVs
+        DATA[25] = 0x00; // 25 U1 - cnoThresh
+        DATA[26] = 0x00; // 26 U1[2] - reserved1
+        DATA[27] = 0x00; // U1 -    reserved1
+        DATA[28] = 0x00; // 28 U2 - staticHoldMaxDist
+        DATA[29] = 0x00; // U2 - staticHoldMaxDist
+        DATA[30] = 0x00; // 30 U1 - utcStandard
+        DATA[31] = 0x00; // 31 U1[5] - reserved2
+        DATA[32] = 0x00; // U1 -    reserved2
+        DATA[33] = 0x00; // U1 -    reserved2
+        DATA[34] = 0x00; // U1 -    reserved2
+        DATA[35] = 0x00; // U1 -    reserved2
+      }
+    }
+    // end UBX-CFG-NAV5 (0x06 0x24)
+    // ID CFG-TP5 (0x31)
+    // https://forum.pjrc.com/threads/46058-A-UBlox-GPS-Module-Primer-for-beginners
+    if (ID == 0x31)
+    {
+      // ID CFG-TP5 (0x06 0x31) Time Pulse Parameters
+      if (Bit16PayloadLen == 0x20)
+      {
+        // Length (Bytes) DEC 32
+        uint8_t FreqLock3 = ((P32t0 & 0xFF000000) >> 24); // P32t0 FreqLocked
+        uint8_t FreqLock2 = ((P32t0 & 0x00FF0000) >> 16);
+        uint8_t FreqLock1 = ((P32t0 & 0x0000FF00) >> 8);
+        uint8_t FreqLock0 = (P32t0 & 0x000000FF);
+        uint8_t DutyLocked3 = ((P32t1 & 0xFF000000) >> 24); // P32t1 Duty Locked %
+        uint8_t DutyLocked2 = ((P32t1 & 0x00FF0000) >> 16);
+        uint8_t DutyLocked1 = ((P32t1 & 0x0000FF00) >> 8);
+        uint8_t DutyLocked0 = (P32t1 & 0x000000FF);
+        DATA[0] = Identifier; // 0  U1 - tpIdx
+        DATA[1] = reserved0; // 1  U1 - version
+        DATA[2] = 0x00; // 2  U1[2] - reserved1
+        DATA[3] = 0x00; // U1 -    reserved1
+        DATA[4] = Par0; // 4  I2 - antCableDelay, 0~32767, default 50ns
+        DATA[5] = Par1; // I2 - antCableDelay
+        DATA[6] = 0x00; // 6  I2 - rfGroupDelay, default 0ns
+        DATA[7] = 0x00; // I2 - rfGroupDelay
+        DATA[8] = 0x01; // 8  U4 - freqPeriod, default 1Hz or us
+        DATA[9] = 0x00; // U4 - freqPeriod
+        DATA[10] = 0x00; // U4 - freqPeriod
+        DATA[11] = 0x00; // U4 - freqPeriod
+        DATA[12] = FreqLock0; // 12 U4 - freqPeriodLock, 24000000Hz ~ 1Hz or us
+        DATA[13] = FreqLock1; // U4 - freqPeriodLock
+        DATA[14] = FreqLock2; // U4 - freqPeriodLock
+        DATA[15] = FreqLock3; // U4 - freqPeriodLock
+        DATA[16] = 0x00; // 16 U4 - pulseLenRatio, default 0us_or_2^-32
+        DATA[17] = 0x00; // U4 - pulseLenRatio
+        DATA[18] = 0x00; // U4 - pulseLenRatio
+        DATA[19] = 0x00; // U4 - pulseLenRatio
+        DATA[20] = DutyLocked0; // 20 U4 - pulseLenRatioLock, us_or_2^-32
+        DATA[21] = DutyLocked1; // U4 - pulseLenRatioLock,(100% 4294967295)
+        DATA[22] = DutyLocked2; // U4 - pulseLenRatioLock
+        DATA[23] = DutyLocked3; // U4 - pulseLenRatioLock
+        DATA[24] = 0x00; // 24 I4 - userConfigDelay, default 0ns
+        DATA[25] = 0x00; // I4 - userConfigDelay
+        DATA[26] = 0x00; // I4 - userConfigDelay
+        DATA[27] = 0x00; // I4 - userConfigDelay
+        DATA[28] = 0xEF; // 28 X4 - flags, 0xEF *BIN-11101111‬
+        DATA[29] = 0x00; // X4 - flags
+        DATA[30] = 0x00; // X4 - flags
+        DATA[31] = 0x00; // X4 - flags
+      }
+    }
+    // end UBX-CFG-TP5 (0x06 0x31)
+    break;
+    case 0x0A:// MON 0x0A
+    case 0x0B:// AID 0x0B
+    case 0x0D:// TIM 0x0D
+    case 0x10:// ESF 0x10
+    case 0x13:// MGA 0x13
+    case 0x21:// LOG 0x21
+    case 0x27:// SEC 0x27
+    case 0x28:// HNR 0x28
+    // break;
     default:
     // Not Supported
     Serial.println("Not Supported COMMAND CLASS:"), Serial.println(CLASS, HEX);
@@ -300,7 +363,6 @@ void UBLOX::writeCommand(uint8_t CLASS, uint8_t ID, uint8_t PayloadLen0, uint8_t
   // The checksum is calculated over the packet, starting and including the
   // CLASS field, ID field and payload, up until, but excluding, the Checksum Field
   // (CRC) Compute checksum
-  // NOTE: @ GPS baud 460800 CRC = 0x0C, 0xBC
   uint8_t CK_A = 0, CK_B = 0;
   CK_A = CK_A + CLASS;
   CK_B = CK_B + CK_A;
@@ -316,15 +378,36 @@ void UBLOX::writeCommand(uint8_t CLASS, uint8_t ID, uint8_t PayloadLen0, uint8_t
     CK_B = CK_B + CK_A;
   }
   // Generate the command
-  if (Bit16PayloadLen == 0x06)
+  if (Bit16PayloadLen == 0x03)
   {
-    // Payload Length HEX 06 ~ DEC 6
+    // Payload Length 0x03 ~ DEC 3
     uint8_t COMMpayload[HeaderLength + CLASSandID + LenF + Bit16PayloadLen + CRC] =
     {
       /* Header */
       0xB5, // [ 0] synchronization characters: 0xB5 0x62
       0x62, // [ 1]
-      CLASS, // [ 2] Destination,  // B5 62 06 08 06 00 D0 07 01 00 01 00 ED BD
+      CLASS, // [ 2] Destination,
+      ID, // [ 3]
+      PayloadLen0, // [ 4] 8bit Payload Length
+      PayloadLen1, // [ 5] 8bit Payload Length
+      (DATA[0]), // [ 6] Payload HEX 0x06 ~ DEC 6
+      (DATA[1]), // [ 7]
+      (DATA[2]), // [ 8]
+      CK_A, // [12] CRC 16-bit
+      CK_B // [13]
+    };
+    _port -> flush();
+    _port -> write(COMMpayload, sizeof(COMMpayload));
+  }
+  if (Bit16PayloadLen == 0x06)
+  {
+    // Payload Length 0x06 ~ DEC 6
+    uint8_t COMMpayload[HeaderLength + CLASSandID + LenF + Bit16PayloadLen + CRC] =
+    {
+      /* Header */
+      0xB5, // [ 0] synchronization characters: 0xB5 0x62
+      0x62, // [ 1]
+      CLASS, // [ 2] Destination,
       ID, // [ 3]
       PayloadLen0, // [ 4] 8bit Payload Length
       PayloadLen1, // [ 5] 8bit Payload Length
@@ -337,12 +420,12 @@ void UBLOX::writeCommand(uint8_t CLASS, uint8_t ID, uint8_t PayloadLen0, uint8_t
       CK_A, // [12] CRC 16-bit
       CK_B // [13]
     };
-    _port -> flush(); // Waits for the transmission of outgoing serial data to complete
+    _port -> flush();
     _port -> write(COMMpayload, sizeof(COMMpayload));
   }
   if (Bit16PayloadLen == 0x14)
   {
-    // Payload Length HEX 14 ~ DEC 20
+    // Payload Length 0x14 ~ DEC 20
     uint8_t COMMpayload[HeaderLength + CLASSandID + LenF + Bit16PayloadLen + CRC] =
     {
       /* Header */
@@ -375,12 +458,62 @@ void UBLOX::writeCommand(uint8_t CLASS, uint8_t ID, uint8_t PayloadLen0, uint8_t
       CK_A, // [26] CRC 16-bit
       CK_B // [27]
     };
-    _port -> flush(); // Waits for the transmission of outgoing serial data to complete
+    _port -> flush();
+    _port -> write(COMMpayload, sizeof(COMMpayload));
+  }
+  if (Bit16PayloadLen == 0x20)
+  {
+    // Payload Length 0x20 ~ DEC 32
+    uint8_t COMMpayload[HeaderLength + CLASSandID + LenF + Bit16PayloadLen + CRC] =
+    {
+      /* Header */
+      0xB5, // [ 0] synchronization characters: 0xB5 0x62
+      0x62, // [ 1]
+      CLASS, // [ 2] Destination
+      ID, // [ 3]
+      PayloadLen0, // [ 4] 8bit Payload Length
+      PayloadLen1, // [ 5] 8bit Payload Length
+      (DATA[0]), // [ 6] Payload HEX 20 ~ DEC 32
+      (DATA[1]), // [ 7]
+      (DATA[2]), // [ 8]
+      (DATA[3]), // [ 9]
+      (DATA[4]), // [10]
+      (DATA[5]), // [11]
+      (DATA[6]), // [12]
+      (DATA[7]), // [13]
+      (DATA[8]), // [14]
+      (DATA[9]), // [15]
+      (DATA[10]), // [16]
+      (DATA[11]), // [17]
+      (DATA[12]), // [18]
+      (DATA[13]), // [19]
+      (DATA[14]), // [20]
+      (DATA[15]), // [21]
+      (DATA[16]), // [22]
+      (DATA[17]), // [23]
+      (DATA[18]), // [24]
+      (DATA[19]), // [25]
+      (DATA[20]), // [26]
+      (DATA[21]), // [27]
+      (DATA[22]), // [28]
+      (DATA[23]), // [29]
+      (DATA[24]), // [30]
+      (DATA[25]), // [31]
+      (DATA[26]), // [32]
+      (DATA[27]), // [33]
+      (DATA[28]), // [34]
+      (DATA[29]), // [35]
+      (DATA[30]), // [36]
+      (DATA[31]), // [37]
+      CK_A, // [38] CRC 16-bit
+      CK_B // [39]
+    };
+    _port -> flush();
     _port -> write(COMMpayload, sizeof(COMMpayload));
   }
   if (Bit16PayloadLen == 0x24)
   {
-    // Payload Length HEX 24 ~ DEC 36
+    // Payload Length 0x24 ~ DEC 36
     uint8_t COMMpayload[HeaderLength + CLASSandID + LenF + Bit16PayloadLen + CRC] =
     {
       /* Header */
@@ -542,7 +675,8 @@ void UBLOX::SetGPSbaud(uint32_t baud32rate, bool printACK)
     // 1 UART 1
     // 3 USB
     // 4 SPI
-    writeCommand(CLASS, ID, Length0, Length1, Identifier, res0, Par0, Par1, Par2, Par3);
+    uint32_t P32t0 = 0, P32t1 = 0; // not used for this command
+    writeCommand(CLASS, ID, Length0, Length1, Identifier, res0, Par0, Par1, Par2, Par3, P32t0, P32t1);
   }
 }
 
@@ -711,7 +845,8 @@ void UBLOX::SetRATE(uint16_t measRate, bool printACK)
     uint8_t Identifier = (measRate & 0x00FF);
     uint8_t CLASS = 0x06, ID = 0x08, Length0 = 0x06, Length1 = 0x00;
     uint8_t Par0 = 0x01, Par1 = 0x00, Par2 = 0x01, Par3 = 0x00; // navRate and timeRef Parameters.
-    writeCommand(CLASS, ID, Length0, Length1, Identifier, res0, Par0, Par1, Par2, Par3);
+    uint32_t P32t0 = 0, P32t1 = 0; // not used for this command
+    writeCommand(CLASS, ID, Length0, Length1, Identifier, res0, Par0, Par1, Par2, Par3, P32t0, P32t1);
   }
 }
 
@@ -823,21 +958,121 @@ void UBLOX::SetNAV5(uint8_t dynModel, bool printACK)
     // Identifier & res0 - 16bit Parameter bitmask. Only the masked parameters will be applied.
     uint8_t CLASS = 0x06, ID = 0x24, Length0 = 0x24, Length1 = 0x00, Identifier = B00000001, res0 = B00000000; // reserved0
     uint8_t Par1 = 0, Par2 = 0, Par3 = 0; // Parameters, Par0 set in switch case.
-    writeCommand(CLASS, ID, Length0, Length1, Identifier, res0, Par0, Par1, Par2, Par3);
+    uint32_t P32t0 = 0, P32t1 = 0; // not used for this command
+    writeCommand(CLASS, ID, Length0, Length1, Identifier, res0, Par0, Par1, Par2, Par3, P32t0, P32t1);
+  }
+}
+
+// UBX-CFG-TP5 (0x06 0x31) - Set Time Pulse Parameters for Time Pulse 0
+// Generate the configuration command's syntax
+void UBLOX::SetCFG_TP5(uint32_t FreqLocked, double DutyLocked, uint16_t antCableDelay, bool printACK)
+{
+  bool Supported = false;
+  uint8_t Par1 = 0;
+  uint8_t Par0 = 0;
+  uint32_t P32t0 = 0; // FreqLocked
+  uint32_t P32t1 = 0; // DutyLocked
+  if ((FreqLocked >= 1 && FreqLocked <= 24000000) && (DutyLocked >= 0.000000 && DutyLocked <= 100) && (antCableDelay >= 0 && antCableDelay <= 32767))
+  {
+    P32t0 = FreqLocked; // FreqLocked, range 24000000Hz ~ 1Hz.
+    // arduino "map" function and large numbers won't fit in a 32-bit long integer, math overflow
+    // rolling my own "map" function
+    double out_max = 4294967296; // 0x*100000000‬
+    double out_min = 0;
+    double in_max = 100;
+    double in_min = 0;
+    double RetX = 0;
+    RetX = ((DutyLocked - in_min) * (out_max - out_min) / (in_max - in_min) + out_min);
+    if (RetX == 4294967296)
+    {
+      RetX = RetX - 1; // 4294967295
+      Serial.print("\t(limit) ");
+    }
+    P32t1 = RetX; // DutyLocked, range 0 ~ 4294967295(0~100%)
+    // Par0, Par1 - 16bit Parameter defines the Antenna cable delay, MIN 0 MAX 32767, default 50ns Antenna cable delay
+    Par1 = ((antCableDelay & 0xFF00) >> 8);
+    Par0 = (antCableDelay & 0x00FF);
+    Supported = true;
+    if (printACK == true)
+    {
+      Serial.print("Setting CFG-TP5 (0x06 0x31) Time Pulse 0 Parameters"), Serial.print("\t(FreqLocked) "), Serial.print(FreqLocked);
+      Serial.print("Hz  (DutyLocked) "), Serial.print(DutyLocked, 6), Serial.print("% map("), Serial.print(P32t1);
+      Serial.print(")  (antCableDelay) "), Serial.print(antCableDelay), Serial.println("ns");
+      _pACK_TP5 = true;
+    }
+  }
+  else
+  {
+    Supported = false;
+    Serial.println("\tSetting CFG-TP5 (0x06 0x31) Time Pulse 0 Parameters issue");
+    Serial.print("\tNot Supported :"), Serial.println("\tPossible Configurations");
+    Serial.println("\tSetCFG_TP5(FreqLocked- 1Hz ~ 24000000Hz, DutyLocked- 0.000000% ~ 100.000000%, antCableDelay- 0~32767ns, print usb ACK- true or false);");
+    Serial.println();
+  }
+  uint8_t Par2 = 0, Par3 = 0; // Parameters not used for this command
+  if (Supported == true)
+  {
+    // Identifier ~ Time pulse selection(0 = TIMEPULSE 0), res0 ~ Message version (1 for this version)
+    uint8_t CLASS = 0x06, ID = 0x31, Length0 = 0x20, Length1 = 0x00, Identifier = 0, res0 = 1;
+    writeCommand(CLASS, ID, Length0, Length1, Identifier, res0, Par0, Par1, Par2, Par3, P32t0, P32t1);
+  }
+}
+
+void UBLOX::Poll_CFG_TP5(bool printACK)
+{
+  // UBX-CFG-TP5 (0x06 0x31) Poll Time Pulse Parameters
+  while (12 > _port -> availableForWrite())
+  {
+  }
+  _port -> write(_Poll_CFG_TP5, sizeof(_Poll_CFG_TP5));
+  _port -> flush();
+  if (printACK == true)
+  {
+    Serial.println(" Poll_CFG_TP5, Time Pulse 0 Parameters");
+    _pACK_TP5 = true;
   }
 }
 
 void UBLOX::Poll_GPSbaud_Port1(bool printACK)
 {
   // CFG-PRT (0x06 0x00) Polls the configuration for one I/O Port, (I/O Target # MSG) 0x01=I/O UART1 0x06001
-  while (10 > _port -> availableForWrite())
+  while (38 > _port -> availableForWrite())
   {
   }
   _port -> write(_Poll_CFG_PRT, sizeof(_Poll_CFG_PRT));
+  _port -> flush();
   if (printACK == true)
   {
-    _printACK = 0x06001; // print ACK to USB - Clas 06, Id 00, print ACK I/O UART1 0x06001
-    parse(); // force reading serial on cold boot
+    _printACK = 0x06001; // USB - Clas 06, Id 00, print ACK I/O UART1 0x06001
+    // parse(); // force reading serial on cold boot
+  }
+}
+
+void UBLOX::Poll_MON_IO(bool printACK)
+{
+  // Poll-MON-IO (0x0A 0x02) I/O Subsystem Status
+  while (12 > _port -> availableForWrite())
+  {
+  }
+  _port -> write(_Poll_MON_IO, sizeof(_Poll_MON_IO));
+  _port -> flush();
+  if (printACK == true)
+  {
+    Serial.println(" Poll_MON_IO, I/O Subsystem Status");
+  }
+}
+
+void UBLOX::Poll_MON_VER(bool printACK)
+{
+  // Poll-MON-VER (0x0A 0x04) Receiver/Software Version
+  while (12 > _port -> availableForWrite())
+  {
+  }
+  _port -> write(_Poll_MON_VER, sizeof(_Poll_MON_VER));
+  _port -> flush();
+  if (printACK == true)
+  {
+    Serial.println(" Poll_MON_VER, Receiver/Software Version");
   }
 }
 
@@ -846,7 +1081,6 @@ void UBLOX::Poll_NAV_PVT()
   while (12 > _port -> availableForWrite())
   {
   }
-  // check if the hardware serial port has room for outgoing bytes to TX buffer
   _port -> write(_Poll_NAV_PVT, sizeof(_Poll_NAV_PVT));
 }
 
@@ -954,6 +1188,31 @@ void UBLOX::Dis_NAV_POSLLH(bool printACK)
     Serial.println("Setting Dis_NAV_POSLLH");
     _printACK_POSLLH = 0x06010; // Clas 06, Id 01, Dis 0
   }
+}
+
+// Generate the configuration command's syntax
+void UBLOX::Ena_Dis_MON_IO(bool on_off, bool printACK)
+{
+  // UBX-CFG-MSG (0x06 0x01)
+  // Set periodic auto update message rate configuration for UBX-MON-IO (0x0A 0x02) I/O Subsystem Status
+  if (printACK == true)
+  {
+    if (on_off == true)
+    {
+      _print_I_O = 3;
+      Serial.print("Setting Ena_MON_IO");
+    }
+    else
+    {
+      _print_I_O = 2;
+      Serial.print("Setting Dis_MON_IO");
+    }
+    Serial.println(" (0x0A 0x02) I/O Subsystem Status");
+  }
+  uint8_t CLASS = 0x06, ID = 0x01, Length0 = 0x03, Length1 = 0x00, Identifier = 0x0A, res0 = 0x02;
+  uint8_t Par1 = 0, Par2 = 0, Par3 = 0;
+  uint32_t P32t0 = 0, P32t1 = 0; // not used for this command
+  writeCommand(CLASS, ID, Length0, Length1, Identifier, res0, on_off, Par1, Par2, Par3, P32t0, P32t1);
 }
 
 // #### u-blox Disable All NMEA Child Messages Command ####
@@ -1450,66 +1709,62 @@ bool UBLOX::read(gpsData * gpsData_ptr)
       // return true on receiving a full packet
       return true;
     }
-    // UBX-CFG-PRT 0x06 0x00 Poll Request Polls the configuration for one I/O Port , len[1]
-    // UBX-CFG-PRT 0x06 0x00 Get/Set Port Configuration for UART-USB-SPI-DDC(I²C) Port, len[20]
-    if (_UBX_CFG_PRT_ID == true)
+    if (_UBX_CFG_ID == true)
     {
-      // Decide what to do based on payload size, length in decimal format
-      uint8_t MSGpayload = (_gpsPayload[3] << 8) | _gpsPayload[2]; // Combining two uint8_t as uint16_t
-      switch (MSGpayload)
+      uint16_t MSGpayload = (_gpsPayload[3] << 8) | _gpsPayload[2]; // Combining two uint8_t as uint16_t
+      uint32_t DCL0 = 0;
+      float DCL1 = 0;
+      switch (_gpsPayload[1])
       {
-        // 16Bit-Length Field
-        case 1:// if MSG payload size == 0x01 Poll Request Polls the configuration for one I/O Port , len[1] DEC
-        Serial.print("Poll Request Polls the configuration for one I/O Port:"), Serial.println(_gpsPayload[4]), Serial.println(); // USB debug print
+        // UBX-CFG (0x06) Class
+        case 0x00:// UBX-CFG-PRT (0x06 0x00) Port Configuration for UART
+        switch (MSGpayload)
+        {
+          // 16Bit-Length Field, Decide what to do based on payload size, length in decimal format
+          case 1:// UBX-CFG-PRT 0x06 0x00 Poll Request Polls the configuration for one I/O Port , len[1]
+          Serial.print("Poll Request Polls the configuration for one I/O Port:"), Serial.println(_gpsPayload[4]), Serial.println(); // USB debug print
+          break;
+          case 20:// UBX-CFG-PRT 0x06 0x00 Get/Set Port Configuration for UART-USB-SPI-DDC(I²C) Port, len[20]
+          // Decide what to do based on _gpsPayload:[4] Payload Content-I/O portID: 0=DDC(I2C), 1=UART1, 2=UART2, 3=USB, 4=SPI, 5=reserved
+          if (_gpsPayload[4] == 1)
+          {
+            // 1=UART1
+            GpsUart1Baud.b[0] = _gpsPayload[12];
+            GpsUart1Baud.b[1] = _gpsPayload[13];
+            GpsUart1Baud.b[2] = _gpsPayload[14];
+            GpsUart1Baud.b[3] = _gpsPayload[15];
+            gpsData_ptr -> GpsUart1Baud = GpsUart1Baud.val;
+            // need this for ACK_ACK print
+            _GpsUartBaud = (((_gpsPayload[15] << 24) | (_gpsPayload[14] << 16)) | (_gpsPayload[13] << 8)) | _gpsPayload[12]; // Combining
+          }
+          else
+          {
+            Serial.print("I/O portID: 0=DDC(I2C), 2=UART2, 3=USB, 4=SPI, 5=reserved "), Serial.print(_gpsPayload[4]), Serial.println(" Not implemented"), Serial.println();
+          }
+          break;
+          default:
+          // Not Supported
+          Serial.print("Unknown CFG PRT Length Field:"), Serial.println((_MSGpayloadSize) - 4, DEC), Serial.println();
+          break;
+        }
+        // end UBX-CFG-PRT (0x06 0x00)
         break;
-        case 20:// if MSG payload size == (HEX0x14~DEC20) Get/Set Port Configuration for UART-USB-SPI-DDC(I²C) Port, len[20]
-        // Decide what to do based on _gpsPayload:[4] Payload Content-I/O portID: 0=DDC(I2C), 1=UART1, 2=UART2, 3=USB, 4=SPI, 5=reserved
-        if (_gpsPayload[4] == 1)
-        {
-          // 1=UART1
-          // *** Example UART1 460800‬ baud ***
-          // Message Structure
-          // Header,Clas,  Id, DataSize 16b,     MSG, Checksum
-          // 0xB5 0x62,0x06 0x00,     20 Bytes, Payload, CK_A CK_B
-          // Payload Contents:
-          // Byte Offset___Number Format______Scaling__________Name______Unit_______________________Description
-          // gpsPayload:[4]  0---- U1--uint8_t-------------------- portID --------- I/O port Target Number assignment
-          // gpsPayload:[5]  1---- U1--uint8_t----------------- reserved0 ---------------------------------- Reserved
-          // --------- 2---- X2-uint16_t------------------- txReady -------------------------- Bitfield txReady
-          // --------- 4---- X4-uint32_t---------------------- mode ----------------------------- Bitfield mode
-          // gpsPayload:[12] 8---- U4-uint32_t------------------ baudRate ---Bits/s---------- Baudrate in bits/second
-          // gpsPayload:[13] 9
-          // gpsPayload:[14]10
-          // gpsPayload:[15]11
-          // 12---- X2-uint16_t--------------- inProtoMask --------------- Mask input protocols active
-          // 14---- X2-uint16_t-------------- outProtoMask -------------- Mask output protocols active
-          // -------- 16---- U2-uint16_t----------------- reserved4 ------------------------ Always set to zero
-          // ---------18---- U2-uint16_t----------------- reserved5 ------------------------ Always set to zero
-          // Header|CL|Id|DSize| MSG Payload                                                 |Checksum|
-          // _gpsPayload:[n]       | 0| 1| 2  3| 4  5  6  7  8  9 10 11  12 13 14 15  16 17 18 18 19 20 21 22|23 24   |
-          // 23:46:54   0000   B5 62|06 00|14 00|01 00 00 00 D0 08 00 00 >00 08 07 00< 07 00 03 00 00 00 00 00|0C BC   |  µb........Ð................¼.
-          // >baudRate uint32_t<
-          // Little Endian: Hex: 0x00080700
-          // Big Endian:    Hex: 0x00070800 Decimal = **460800‬baud
-          GpsUart1Baud.b[0] = _gpsPayload[12];
-          GpsUart1Baud.b[1] = _gpsPayload[13];
-          GpsUart1Baud.b[2] = _gpsPayload[14];
-          GpsUart1Baud.b[3] = _gpsPayload[15];
-          gpsData_ptr -> GpsUart1Baud = GpsUart1Baud.val;
-          // need this for ACK_ACK print
-          _GpsUartBaud = (((_gpsPayload[15] << 24) | (_gpsPayload[14] << 16)) | (_gpsPayload[13] << 8)) | _gpsPayload[12]; // Combining
-        }
-        else
-        {
-          Serial.print("I/O portID: 0=DDC(I2C), 2=UART2, 3=USB, 4=SPI, 5=reserved "), Serial.print(_gpsPayload[4]), Serial.println(" Not implemented"), Serial.println(); // USB debug print
-        }
+        case 0x31:// UBX-CFG-TP5 (0x06 0x31) Time Pulse Parameters
+        gpsData_ptr -> antCableDelay = (_gpsPayload[9] << 8) | _gpsPayload[8]; // 0~32767, default 50ns
+        gpsData_ptr -> freqPeriodL = (((_gpsPayload[19] << 24) | (_gpsPayload[18] << 16)) | (_gpsPayload[17] << 8)) | _gpsPayload[16]; // 24000000Hz ~ 1Hz
+        DCL0 = (((_gpsPayload[27] << 24) | (_gpsPayload[26] << 16)) | (_gpsPayload[25] << 8)) | _gpsPayload[24]; // (100%=4294967295)
+        // re map duty cycle locked %
+        // arduino "map" function and large numbers won't fit in a long integer, math overflow
+        // rolling my own "map" function
+        DCL1 = modifiedMap(DCL0, 0, 4294967295, -0.125, 99.875);
+        gpsData_ptr -> dutycycleL = DCL1;
         break;
         default:
         // Not Supported
-        Serial.print("Unknown CFG PRT Length Field:"), Serial.println((_MSGpayloadSize) - 4, DEC), Serial.println();
+        Serial.print("Unknown CFG Class:0x"), Serial.println((_gpsPayload[1]), HEX), Serial.println();
         break;
       }
-      _UBX_CFG_PRT_ID = false;
+      _UBX_CFG_ID = false;
       // return false even though its packets are successfully being received, not a NAV packet
       return false;
     }
@@ -1553,7 +1808,7 @@ bool UBLOX::read(gpsData * gpsData_ptr)
               }
             }
             break;
-            case 0x01:// CFG-MSG 0x06 0x01: Set Message Rate(s)
+            case 0x01:// CFG-MSG 0x06 0x01: Set Message periodic auto update Rate(s)
             if ((_printACK_Dis_all_NMEA == 0x06010) && CC == 0)
             {
               // Dis_all_NMEA_Child_MSGs 0x06010
@@ -1621,6 +1876,21 @@ bool UBLOX::read(gpsData * gpsData_ptr)
                 _printACK_POSLLH = 0x00;
               }
             }
+            if ((_print_I_O == 3 || _print_I_O == 2) && CC == 0)
+            {
+              CC = 1;
+              Serial.print("UBX_ACK_ACK:"), Serial.print(" Message Acknowledged - ");
+              if (_print_I_O == 3)
+              {
+                Serial.print("Ena_MON_IO "), Serial.println("-Enable periodic auto update");
+                _print_I_O = 0;
+              }
+              if (_print_I_O == 2)
+              {
+                Serial.print("Dis_MON_IO "), Serial.println("-Disable periodic auto update");
+                _print_I_O = 0;
+              }
+            }
             break;
             case 0x02:// CFG-INF 0x06 0x02:       Poll configuration for one protocol or Set Information message configuration
             Serial.println("-CFG-INF 0x06 0x02"), Serial.println();
@@ -1632,11 +1902,11 @@ bool UBLOX::read(gpsData * gpsData_ptr)
             Serial.println("-CFG-CFG 0x06 0x09"), Serial.println();
             break;
             case 0x08:// CFG-RATE 0x06 0x08:      Get/Set Navigation/Measurement Rate Settings
-            // _pACK_RATE =
             if (_pACK_RATE == true)
             {
               Serial.print("UBX_ACK_ACK:"), Serial.print(" Message Acknowledged ");
-              Serial.println("- CFG-RATE 0x06 0x08 Get/Set Navigation/Measurement Rate Settings");
+              Serial.println("- CFG-RATE (0x06 0x08) Get/Set Navigation/Measurement Rate Settings");
+              _pACK_RATE = false;
             }
             break;
             case 0x11:// CFG-RXM 0x06 0x11:       Get/Set RXM configuration
@@ -1664,11 +1934,17 @@ bool UBLOX::read(gpsData * gpsData_ptr)
             if (_pACK_NAV5 == true)
             {
               Serial.print("UBX_ACK_ACK:"), Serial.print(" Message Acknowledged ");
-              Serial.println("- CFG-NAV5 0x06 0x24 Get/Set Navigation Engine Settings");
+              Serial.println("- CFG-NAV5 (0x06 0x24) Set Navigation Engine Settings");
+              _pACK_NAV5 = false;
             }
             break;
             case 0x31:// CFG-TP5 0x06 0x31:       Poll Time Pulse Parameters for Time Pulse 0, Poll Time Pulse Parameters or Get/Set Time Pulse Parameters
-            Serial.println("-CFG-TP5 0x06 0x31"), Serial.println();
+            if (_pACK_TP5 == true)
+            {
+              Serial.print("UBX_ACK_ACK:"), Serial.print(" Message Acknowledged ");
+              Serial.println("- CFG-TP5 (0x06 0x31) Set Time Pulse 0 Parameters");
+              _pACK_TP5 = false;
+            }
             break;
             case 0x34:// CFG-RINV 0x06 0x34       Get/Set Contents of Remote Inventory
             Serial.println("-CFG-RINV 0x06 0x34"), Serial.println();
@@ -1748,6 +2024,67 @@ bool UBLOX::read(gpsData * gpsData_ptr)
       // return false even though its packets are successfully being received, not a NAV packet
       return false;
     }
+    // UBX Class MON (0x0A)
+    if (_UBX_MON_ID == true)
+    {
+      switch (_gpsPayload[1])
+      {
+        // UBX MON IDs
+        case 0x02:// UBX-MON-IO (0x0A 0x02) I/O Subsystem Status
+        // u-blox 7 = I/O Subsystem Status Payload Length:120
+        // 1st 20bytes=I2C _gpsPayload[4], 2nd 20bytes=UART1 _gpsPayload[24], next 20bytes=UART2 Etc.
+        gpsData_ptr -> rxBytes = (((_gpsPayload[27] << 24) | (_gpsPayload[26] << 16)) | (_gpsPayload[25] << 8)) | _gpsPayload[24]; // Combining
+        gpsData_ptr -> txBytes = (((_gpsPayload[31] << 24) | (_gpsPayload[30] << 16)) | (_gpsPayload[29] << 8)) | _gpsPayload[28];
+        gpsData_ptr -> parityErrs = (_gpsPayload[33] << 8) | _gpsPayload[32]; // Combining two uint8_t as uint16_t
+        gpsData_ptr -> framingErrs = (_gpsPayload[35] << 8) | _gpsPayload[34];
+        gpsData_ptr -> overrunErrs = (_gpsPayload[37] << 8) | _gpsPayload[36];
+        gpsData_ptr -> breakCond = (_gpsPayload[39] << 8) | _gpsPayload[38];
+        gpsData_ptr -> rxBusy = _gpsPayload[40];
+        gpsData_ptr -> txBusy = _gpsPayload[41];
+        break;
+        case 0x04:// UBX-MON-VER (0x0A 0x04) Receiver/Software Version
+        // ASCII text to decimal~float converter
+        // 0 CH[30] - swVersion - Zero-terminated Software Version String.
+        gpsData_ptr -> swVersion = i_atoi(_gpsPayload,(4) + 0); // Software Version, e.g. 1.00
+        gpsData_ptr -> swVersion = gpsData_ptr -> swVersion / 100; // Offset
+        // / Serial.print(" MON_VER- ");
+        // / Serial.print("SW Version "), Serial.print(gpsData_ptr->swVersion), Serial.println();
+        // Rev# Software Version, e.g. (59842)
+        gpsData_ptr -> revVersion = i_atoi(_gpsPayload,(4) + 6); // Rev#
+        // / Serial.print("\t REV Version "), Serial.print(gpsData_ptr->revVersion), Serial.println();
+        // 30 CH[10] - hwVersion - Zero-terminated Hardware Version String
+        gpsData_ptr -> hwVersion = i_atoi(_gpsPayload,(4) + 30); // Hardware Version, e.g. 7 = u-blox 7
+        gpsData_ptr -> hwVersion = gpsData_ptr -> hwVersion / 10000; // Offset
+        // / Serial.print("\t HW Version u-blox:"), Serial.print(gpsData_ptr->hwVersion), Serial.println();
+        // 40 + 30*N CH[30] - extension - Extended software information strings.
+        // 40 Start of repeated block, each extension field is 30 characters long.
+        // 1st extension
+        if (_gpsPayload[(4 + 40)] == 'P')
+        {
+          // PROTVER 14.00
+          gpsData_ptr -> extension1 = i_atoi(_gpsPayload,(4) + 48); // Protocol version, e.g. 14.00
+          gpsData_ptr -> extension1 = gpsData_ptr -> extension1 / 100; // Offset
+          // Serial.print("\t 1st ext. Protocol "), Serial.print(gpsData_ptr->extension1), Serial.println();
+          // 2nd extension
+        }
+        else
+          if (_gpsPayload[(4 + 70)] == 'P')
+          {
+            // if PROTVER 14.00
+            gpsData_ptr -> extension1 = i_atoi(_gpsPayload,(4) + 78); //
+            gpsData_ptr -> extension1 = gpsData_ptr -> extension1 / 100; // Offset
+            // / Serial.print("\t 2nd ext. Protocol "), Serial.print(gpsData_ptr->extension1), Serial.println();
+          }
+        break;
+        default:
+        // Not Supported
+        Serial.println(" Unknown Class MON ID:0x0"), Serial.println(_gpsPayload[1], HEX), Serial.println();
+        break;
+      }
+      _UBX_MON_ID = false;
+      // return false even though its packets are successfully being received, not a NAV packet
+      return false;
+    }
     // return true on receiving a full packet
     // return true;
     return true;
@@ -1767,12 +2104,37 @@ bool UBLOX::parse()
   {
     0xB5, 0x62
   };
+  // int rd = 0, wr = 0, n = 0;    // # u-center #
+  // uint8_t buffer[255];  // # u-center #
   // checksum calculation
   static unsigned char checksum[2];
   // read a byte from the serial port
   while (_port -> available())
   {
     uint8_t c = _port -> read();
+    /* ///>
+    // ############ experimental u-center #########################
+    // check if any data has arrived on the USB virtual serial port
+    if (_use_ucenter == true) {
+    rd = Serial.available();
+    if (rd > 0) {
+    // compute how much data to move, the smallest
+    // of rd, wr and the buffer size
+    if (rd > wr) rd = wr;
+    if (rd > 80) rd = 80;
+    // read data from the USB port
+    n = Serial.readBytes((char *)buffer, rd);
+    // write it to the hardware serial port
+    _port->write(buffer, n);
+    }
+    // check if the USB virtual serial port is ready to transmit
+    wr = Serial.availableForWrite();
+    if (wr > 0) {
+    Serial.write(c); // fix byte by byte, it's not efficient
+    }
+    }
+    // ############ experimental u-center ##########################
+    ///> */
     // identify the packet header
     if (_fpos < 2)
     {
@@ -1783,10 +2145,6 @@ bool UBLOX::parse()
       else
       {
         _fpos = 0;
-        // if (c == 36) { // ASCII Table Dec 36~Char $
-        // Serial.write(c); // debug print NMEA message start $ Char
-        // Serial.println(" NMEA message start $ Char"); // USB debug print
-        // }
       }
     }
     // Identify the packet Class
@@ -1813,7 +2171,7 @@ bool UBLOX::parse()
           break;
           case 0x05:// ACK 0x05 Ack/Nack Messages: as replies to CFG Input Messages
           _CurrentClass = c;
-          ((unsigned char *) _gpsPayload)[_fpos - 2] = c; // grab the payload, need for checksum
+          ((unsigned char *) _gpsPayload)[_fpos - 2] = c; // grab the payload
           _fpos++;
           break;
           case 0x06:// CFG 0x06 Configuration Input Messages: Set Dynamic Model, Set DOP Mask, Set Baud Rate, etc.
@@ -1821,10 +2179,15 @@ bool UBLOX::parse()
           ((unsigned char *) _gpsPayload)[_fpos - 2] = c; // grab the payload, need for checksum
           _fpos++;
           break;
-          case 0x0A:// MON 0x0A Monitoring Messages: Comunication Status, CPU Load, Stack Usage, Task Status
-          Serial.print("UBX_MON_CLASS:0x0"), Serial.print(c, HEX), Serial.println(" Not implemented"), Serial.println();
+          case 0x09:// UPD 0x09 Firmware Update Messages: Memory/Flash erase/write, Reboot, Flash identification, etc.
+          Serial.print("UBX_UPD_CLASS:0x0"), Serial.print(c, HEX), Serial.println(" Not implemented"), Serial.println();
           _CurrentClass = c;
           _fpos = 0;
+          break;
+          case 0x0A:// MON 0x0A Monitoring Messages: Comunication Status, CPU Load, Stack Usage, Task Status
+          _CurrentClass = c;
+          ((unsigned char *) _gpsPayload)[_fpos - 2] = c; // grab the payload
+          _fpos++;
           break;
           case 0x0B:// AID 0x0B AssistNow Aiding Messages: Ephemeris, Almanac, other A-GPS data input
           Serial.print("UBX_AID_CLASS:0x0"), Serial.print(c, HEX), Serial.println(" Not implemented"), Serial.println();
@@ -1837,16 +2200,16 @@ bool UBLOX::parse()
           _fpos = 0;
           break;
           // Not Supported
-          // ESF 0x10 External Sensor Fusion Messages: External Sensor Measurements and Status Information
-          // MGA 0x13 Multiple GNSS Assistance Messages: Assistance data for various GNSS
+          // case 0x10: ESF 0x10 External Sensor Fusion Messages: External Sensor Measurements and Status Information
+          // case 0x13: MGA 0x13 Multiple GNSS Assistance Messages: Assistance data for various GNSS
           case 0x21:// LOG 0x21 Logging Messages: Log creation, deletion, info and retrieval
           Serial.print("UBX_LOG_CLASS:0x"), Serial.print(c, HEX), Serial.println(" Not implemented"), Serial.println();
           _CurrentClass = c;
           _fpos = 0;
           break;
           // Not Supported
-          // SEC 0x27 Security Feature Messages
-          // HNR 0x28 High Rate Navigation Results Messages: High rate time, position, speed, heading
+          // case 0x27: SEC 0x27 Security Feature Messages
+          // case 0x28: HNR 0x28 High Rate Navigation Results Messages: High rate time, position, speed, heading
           default:
           // Not Supported
           _CurrentClass = c;
@@ -1860,7 +2223,7 @@ bool UBLOX::parse()
           {
             Serial.print("0x0");
           }
-          Serial.println(c, HEX), Serial.println(); // USB
+          Serial.println(c, HEX), Serial.println();
           break;
         }
       }
@@ -1886,7 +2249,25 @@ bool UBLOX::parse()
           CFG_IDs(c); // Go grab the uBlox CFG - ID
           break;
           case 0x0A:// MON 0x0A
-          _fpos = 0;
+          switch (c)
+          {
+            // load only needed Class MON IDs
+            case 0x02:// UBX-MON-IO (0x0A 0x02) I/O Subsystem Status
+            _UBX_MON_ID = true;
+            ((unsigned char *) _gpsPayload)[_fpos - 2] = c;
+            _fpos++;
+            break;
+            case 0x04:// UBX-MON-VER (0x0A 0x04) Receiver/Software Version
+            _UBX_MON_ID = true;
+            ((unsigned char *) _gpsPayload)[_fpos - 2] = c;
+            _fpos++;
+            break;
+            default:
+            // Not Supported
+            _fpos = 0;
+            Serial.print(" Not implemented Class MON ID:0x0"), Serial.println(c, HEX), Serial.println();
+            break;
+          }
           break;
           case 0x0B:// AID 0x0B
           _fpos = 0;
@@ -1910,14 +2291,21 @@ bool UBLOX::parse()
     else
       if (_fpos == 4)
       {
-        // Serial.write(c); // USB u-center
         ((unsigned char *) _gpsPayload)[_fpos - 2] = c; // least significant byte (LSB)
-        _fpos++;
+        // prevent _gpsPayload[_payloadSize] array overrun error, currently set @ 150
+        if (c < _payloadSize)
+        {
+          _fpos++;
+        }
+        else
+        {
+          Serial.print("_gpsPayload[_payloadSize] array error:"), Serial.println(c);
+          _fpos = 0;
+        }
       }
     else
       if (_fpos == 5)
       {
-        // Serial.write(c); // USB u-center
         ((unsigned char *) _gpsPayload)[_fpos - 2] = c; // most significant byte (MSB)
         _MSGpayloadSize = (_gpsPayload[3] << 8) | _gpsPayload[2]; // Combining two uint8_t as uint16_t
         _MSGpayloadSize = _MSGpayloadSize + 4; // Fix for (CRC), Add 8Bit-Class, 8Bit-ID, 16Bit-Length Field
@@ -1979,22 +2367,24 @@ void UBLOX::CFG_IDs(uint8_t SERc)
   switch (SERc)
   {
     // ### Name CFG-Class & IDs Description, Msg Length ###
-    case 0x00:// UBX-CFG-PRT 0x06 0x00 Poll Request Polls the configuration for one I/O Port , len[1]
-    // CFG-PRT 0x06 0x00 Get/Set Port Configuration for UART-USB-SPI-DDC(I²C) Port, len[20]
-    _UBX_CFG_PRT_ID = true; // next - decide what to do based on MSG payload size
-    ((unsigned char *) _gpsPayload)[_fpos - 2] = SERc; // grab the payload, need for checksum
+    case 0x00:// UBX-CFG-PRT 0x06 0x00 Poll or Get/Set Request Polls the configuration for one I/O Port , len[1]
+    _UBX_CFG_ID = true;
+    ((unsigned char *) _gpsPayload)[_fpos - 2] = SERc;
     _fpos++;
     break;
-    case 0x01:// UBX-CFG-MSG 0x06 0x01 Poll Request Poll a message configuration, len[2]
-    // UBX-CFG-MSG 0x06 0x01 Get/Set Set Message Rate(s), len[8]
-    // UBX-CFG-MSG 0x06 0x01 Get/Set Set Message Rat, len[3]
+    case 0x01:// UBX-CFG-MSG 0x06 0x01 Get/Set Set Message Rate(s)
     Serial.print("UBX_CFG_MSG ID:"), Serial.print(SERc, HEX), Serial.println(" Not implemented"), Serial.println();
     _fpos = 0;
+    break;
+    case 0x31:// UBX-CFG-TP5 0x06 0x31 Time Pulse Parameters
+    _UBX_CFG_ID = true;
+    ((unsigned char *) _gpsPayload)[_fpos - 2] = SERc;
+    _fpos++;
     break;
     default:
     // Not Supported
     _fpos = 0;
-    Serial.println(" Not implemented or Unknown packet Class CFG ID:"), Serial.println(SERc, HEX), Serial.println();
+    Serial.print(" Not implemented or Unknown packet Class CFG ID:"), Serial.println(SERc, HEX), Serial.println();
     break;
   }
 }
@@ -2008,7 +2398,6 @@ void UBLOX::ACK_IDs(uint8_t SERa)
   {
     // ### Name ACK-Class & IDs Description, Msg Length ###
     case 0x00://  UBX-ACK-NAK (0x05 0x00) Message Not-Acknowledged, len[2]
-    // Serial.println(" NAK- "); // todo remove
     if ((_printACK == 0x06001 || _printACK_ATT == 0x01 || _printACK_ATT == 0x02) && CN == 0)
     {
       Serial.print("UBX_ACK_NAK:"), Serial.print(" Message Not-Acknowledged ");
@@ -2042,7 +2431,7 @@ void UBLOX::ACK_IDs(uint8_t SERa)
       }
       else
       {
-        Serial.print("UBX_ACK_NAK:"), Serial.println(" Message Not-Acknowledged "); // , Serial.println(SERa);
+        Serial.print("UBX_ACK_NAK:"), Serial.println(" Message Not-Acknowledged ");
       }
     }
     // _UBX_ACK_NAK_ID = true; // Not implemented
@@ -2069,72 +2458,103 @@ void UBLOX::NAV_IDs(uint8_t SERn)
   {
     // ### Name NAV-Class & IDs Description, Msg Length ###
     case 0x01:// NAV-POSECEF 0x01 0x01 Position Solution in ECEF, U-Blox7 = len[20]
-    Serial.print("UBX_NAV_POSECEF ID:"), Serial.print(SERn, HEX), Serial.println(" Not implemented"), Serial.println();
-    _fpos = 0;
+    // ####### experimental todo fix
+    ((unsigned char *) _gpsPayload)[_fpos - 2] = SERn;
+    _fpos++; // ### u center test ###
     break;
     case 0x02:// NAV-POSLLH 0x01 0x02 Geodetic Position Solution, U-Blox7 = len[28]
     _UBX_NAV_POSLLH_ID = true;
-    ((unsigned char *) _gpsPayload)[_fpos - 2] = SERn; // grab the payload, need for checksum
+    ((unsigned char *) _gpsPayload)[_fpos - 2] = SERn;
     _fpos++;
     break;
     case 0x03:// NAV-STATUS 0x01 0x03 Receiver Navigation Status, U-Blox7 = len[16]
-    Serial.print("UBX_NAV_STATUS ID:"), Serial.print(SERn, HEX), Serial.println(" Not implemented"), Serial.println();
-    _fpos = 0;
+    // experimental todo fix
+    ((unsigned char *) _gpsPayload)[_fpos - 2] = SERn;
+    _fpos++; // u center test
     break;
     case 0x04:// NAV-DOP 0x01 0x04 Dilution of precision, U-Blox7 = len[18]
-    Serial.print("UBX_NAV_DOP ID:"), Serial.print(SERn, HEX), Serial.println(" Not implemented"), Serial.println();
-    _fpos = 0;
+    // ####### experimental todo fix
+    ((unsigned char *) _gpsPayload)[_fpos - 2] = SERn;
+    _fpos++; // ### u center test ###
     break;
     // NAV-ATT (0x01 0x05) Attitude Solution, U-Blox8 = len[32]
     case 0x05:// #### NOTE: u-blox 8 only from protocol version 19 up to version 23.01 (only with ADR or UDR products) ###
     _UBX_NAV_ATT_ID = true;
-    ((unsigned char *) _gpsPayload)[_fpos - 2] = SERn; // grab the payload, need for checksum
+    ((unsigned char *) _gpsPayload)[_fpos - 2] = SERn;
     _fpos++;
     break;
     case 0x06:// NAV-SOL 0x01 0x06 Navigation Solution Information, U-Blox7 = len[52]
-    Serial.print("UBX_NAV_SOL ID:"), Serial.print(SERn, HEX), Serial.println(" Not implemented"), Serial.println();
-    _fpos = 0;
+    // experimental todo fix
+    ((unsigned char *) _gpsPayload)[_fpos - 2] = SERn;
+    _fpos++; // u center test
     break;
     case 0x07:// NAV-PVT 0x01 0x07 Navigation Position Velocity Time Solution, U-Blox7=len[84], U-Blox8=len[92]
     _UBX_NAV_PVT_ID = true;
-    ((unsigned char *) _gpsPayload)[_fpos - 2] = SERn; // grab the payload, need for checksum
+    ((unsigned char *) _gpsPayload)[_fpos - 2] = SERn;
     _fpos++;
     break;
+    // case 0x09: NAV-ODO 0x01 0x09 20 Periodic/Polled Odometer Solution
+    // case 0x10: NAV-RESETODO 0x01 0x10 0 Command Reset odometer
     case 0x11:// NAV-VELECEF 0x01 0x11 Velocity Solution in ECEF, U-Blox7 = len[20]
-    Serial.print("UBX_NAV_VELECEF ID:"), Serial.print(SERn, HEX), Serial.println(" Not implemented"), Serial.println();
-    _fpos = 0;
+    // ####### experimental todo fix
+    ((unsigned char *) _gpsPayload)[_fpos - 2] = SERn;
+    _fpos++; // ### u center test ###
     break;
     case 0x12:// NAV-VELNED 0x01 0x12 Velocity Solution in NED, U-Blox7 = len[36]
-    Serial.print("UBX_NAV_VELNED ID:"), Serial.print(SERn, HEX), Serial.println(" Not implemented"), Serial.println();
-    _fpos = 0;
+    // ####### experimental todo fix
+    ((unsigned char *) _gpsPayload)[_fpos - 2] = SERn;
+    _fpos++; // ### u center test ###
     break;
+    // case 0x13: NAV-HPPOSECEF 0x01 0x13 28 Periodic/Polled High Precision Position Solution in ECEF
+    // case 0x14: NAV-HPPOSLLH 0x01 0x14 36 Periodic/Polled High Precision Geodetic Position Solution
     case 0x20:// NAV-TIMEGPS 0x01 0x20 16 Periodic/Polled GPS Time Solution, U-Blox7 = len[16]
-    Serial.print("UBX_NAV_TIMEGPS ID:"), Serial.print(SERn, HEX), Serial.println(" Not implemented"), Serial.println();
-    _fpos = 0;
+    // ####### experimental todo fix
+    ((unsigned char *) _gpsPayload)[_fpos - 2] = SERn;
+    _fpos++; // ### u center test ###
     break;
     case 0x21:// NAV-TIMEUTC 0x01 0x21 UTC Time Solution, U-Blox7 = len[20]
-    Serial.print("UBX_NAV_TIMEUTC ID:"), Serial.print(SERn, HEX), Serial.println(" Not implemented"), Serial.println();
-    _fpos = 0;
+    // ####### experimental todo fix
+    ((unsigned char *) _gpsPayload)[_fpos - 2] = SERn;
+    _fpos++; // ### u center test ###
     break;
     case 0x22:// NAV-CLOCK 0x01 0x22 Clock Solution, U-Blox7 = len[20]
-    Serial.print("UBX_NAV_CLOCK ID:"), Serial.print(SERn, HEX), Serial.println(" Not implemented"), Serial.println();
-    _fpos = 0;
+    // ####### experimental todo fix
+    ((unsigned char *) _gpsPayload)[_fpos - 2] = SERn;
+    _fpos++; // ### u center test ###
     break;
+    // case 0x23: NAV-TIMEGLO 0x01 0x23 20 Periodic/Polled GLO Time Solution
+    // case 0x24: NAV-TIMEBDS 0x01 0x24 20 Periodic/Polled BDS Time Solution
+    // case 0x25: NAV-TIMEGAL 0x01 0x25 20 Periodic/Polled Galileo Time Solution
+    // case 0x26: NAV-TIMELS 0x01 0x26 24 Periodic/Polled Leap second event information
     case 0x30:// NAV-SVINFO U-Blox7 = len[8 + 12*numCh]
-    Serial.print("UBX_NAV_SVINFO ID:"), Serial.print(SERn, HEX), Serial.println(" Not implemented"), Serial.println();
-    _fpos = 0;
+    // ####### experimental todo fix
+    ((unsigned char *) _gpsPayload)[_fpos - 2] = SERn;
+    _fpos++; // ### u center test ###
     break;
     case 0x31:// NAV-DGPS 0x01 0x31 DGPS Data Used for NAV, U-Blox7 = len[16 + 12*numCh]
-    Serial.print("UBX_NAV_DGPS ID:"), Serial.print(SERn, HEX), Serial.println(" Not implemented"), Serial.println();
-    _fpos = 0;
+    // ####### experimental todo fix
+    ((unsigned char *) _gpsPayload)[_fpos - 2] = SERn;
+    _fpos++; // ### u center test ###
     break;
     case 0x32:// NAV-SBAS 0x01 0x32 12 + 12*cnt Periodic/Polled SBAS Status Data
-    Serial.print("UBX_NAV_SBAS ID:"), Serial.print(SERn, HEX), Serial.println(" Not implemented"), Serial.println();
-    _fpos = 0;
+    // ####### experimental todo fix
+    ((unsigned char *) _gpsPayload)[_fpos - 2] = SERn;
+    _fpos++; // ### u center test ###
     break;
+    // case 0x34: NAV-ORB 0x01 0x34 8 + 6*numSv Periodic/Polled GNSS Orbit Database Info
+    // case 0x35: NAV-SAT 0x01 0x35 8 + 12*numSvs Periodic/Polled Satellite Information
+    // case 0x39: NAV-GEOFENCE 0x01 0x39 8 + 2*numFen... Periodic/Polled Geofencing status
+    // case 0x3B: NAV-SVIN 0x01 0x3B 40 Periodic/Polled Survey-in data
+    // case 0x3C: NAV-RELPOSNED 0x01 0x3C 40 Periodic/Polled Relative Positioning Information in NED frame
     case 0x60:// NAV-AOPSTATUS 0x01 0x60 AssistNow Autonomous Status, U-Blox7 = len[20]
-    Serial.print("UBX_NAV_AOPSTATUS ID:"), Serial.print(SERn, HEX), Serial.println(" Not implemented"), Serial.println();
-    _fpos = 0;
+    // ####### experimental todo fix
+    ((unsigned char *) _gpsPayload)[_fpos - 2] = SERn;
+    _fpos++; // ### u center test ###
+    break;
+    case 0x61:// NAV-EOE 0x01 0x61 4 Periodic End Of Epoch
+    // ####### experimental todo fix
+    ((unsigned char *) _gpsPayload)[_fpos - 2] = SERn;
+    _fpos++; // ### u center test ###
     break;
     default:
     // Not Supported
@@ -2144,12 +2564,37 @@ void UBLOX::NAV_IDs(uint8_t SERn)
   }
 }
 
+// String helper
+uint32_t UBLOX::i_atoi(uint8_t s[], uint8_t ptr)
+{
+  uint32_t i, n = 0;
+  for (i = ptr;(s[i] >= '0' && s[i] <= '9') || (s[i] == '.' || s[i] == '('); i++)
+  {
+    if (s[i] == '.' || s[i] == '(')
+    {
+      // ignore the ASCII . period and ASCII (
+    }
+    else
+    {
+      n = 10 * n + (s[i] - '0');
+    }
+  }
+  return n;
+}
+
+double UBLOX::modifiedMap(double x, double in_min, double in_max, double out_min, double out_max)
+{
+  double temp = (x - in_min) * (out_max - out_min) / (in_max - in_min) + out_min;
+  temp = (double) (4 * temp +.5);
+  return(double) temp / 4;
+}
+
 void UBLOX::DEBUG()
 {
   // DEBUG PRINT
   Serial.println("HEADER [0]=HEX B5 DEC *181‬");
   Serial.println("HEADER [1]=HEX 62 DEC ** 98‬‬");
-  uint8_t MSGpayload = (_gpsPayload[3] << 8) | _gpsPayload[2]; // Combining two uint8_t as uint16_t
+  uint16_t MSGpayload = (_gpsPayload[3] << 8) | _gpsPayload[2]; // Combining two uint8_t as uint16_t
   for (int i = 0; i < (MSGpayload) + 4; i++)
   {
     Serial.print("_gpsPayload["), Serial.print(i, DEC), Serial.print("]=");

@@ -16,25 +16,24 @@ BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR P
 NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
 DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
-v1.0.2
+v1.0.3
 Chris O.
-2018-03-01 Changes:
-Identify the packet Class in receive message
-Identify the packet Message ID in receive message
-Identify the packet 16Bit Message payloadSize
-Fixed the checksum calculations, now it's based on*the*received message payload.
-This fixes the compatibility issues between NEO-M8 and NEO-M7-6 GPS series.
-2018-03-01 Addition:
+2018-03-29
+Supported Navigation IDs:
+UBX-NAV-PVT ---- (0x01 0x07) Navigation Position Velocity Time Solution
 UBX-NAV-POSLLH - (0x01 0x02) Geodetic Position Solution
-2018-03-20
 UBX-NAV-ATT ---- (0x01 0x05) Attitude Solution
-/---  High level commands, for the user ---/
+/---  High level Commands, for the user ---/
 NOTE: command(bool) == (true)Print Message Acknowledged on USB Serial Monitor
+begin(Baud)                       // Starting communication with the GPS
 end();                            // Disables Teensy serial communication, to re-enable, call begin(Baud)
 Poll_CFG_Port1(bool);             // Polls the configuration for one I/O Port, I/O Target 0x01=UART1
 Poll_NAV_PVT();                   // Polls UBX-NAV-PVT    (0x01 0x07) Navigation Position Velocity Time Solution
 Poll_NAV_POSLLH();                // Polls UBX-NAV-POSLLH (0x01 0x02) Geodetic Position Solution
 Poll_NAV_ATT();                   // Polls UBX-NAV-ATT    (0x01 0x05) Attitude Solution
+Poll_MON_IO(bool);                // Polls UBX-MON-IO (0x0A 0x02) I/O Subsystem Status
+Poll_MON_VER(bool);               // Polls UBX-MON-VER (0x0A 0x04) Receiver/Software Version
+Poll_CFG_TP5(bool);               // Polls CFG-TP5        (0x06 0x31) Poll Time Pulse 0 Parameters
 ### Periodic Auto Update ON,OFF Command ###
 Ena_NAV_PVT(bool);                // Enable periodic auto update NAV_PVT
 Dis_NAV_PVT(bool);                // Disable periodic auto update NAV_PVT
@@ -48,6 +47,8 @@ Dis_all_NMEA_Child_MSGs(bool);    // Disable All NMEA Child Messages Command
 SetGPSbaud(uint32_t baud, bool)   // Set UBLOX GPS Port Configuration Baud rate
 SetNAV5(uint8_t dynModel, bool)   // Set Dynamic platform model Navigation Engine Settings (0:portable, 3:pedestrian, Etc)
 SetRATE(uint16_t measRate, bool)  // Set Navigation/Measurement Rate Settings (100ms=10.00Hz, 200ms=5.00Hz, 1000ms=1.00Hz, Etc)
+SetCFG_TP5(uint32_t FreqLocked, double DutyLocked, uint16_t antCableDelay, bool printACK); // UBX-CFG-TP5 (0x06 0x31) Time Pulse 0 Parameters
+Ena_Dis_MON_IO(bool En~Di, bool) // UBX-MON-IO (0x0A 0x02) Ena/Dis periodic auto update I/O Subsystem Status, bytes(received, sent), parity , framing , overrun)
 */
 // UBX-NAV-POSLLH -- Geodetic Position Solution
 // ### UBX Protocol, Class NAV 0x01, ID 0x02 ###
@@ -150,9 +151,29 @@ struct gpsData
   double accRoll; // /< [deg], Vehicle roll accuracy (if null, roll angle is not available).
   double accPitch; // /< [deg], Vehicle pitch accuracy (if null, pitch angle is not available).
   double accHeading; // /< [deg], Vehicle heading accuracy (if null, heading angle is not available).
-  /* Returned after sending command */
-  // Send command, gps.Poll_CFG_Port1(true); // true = print ACK on usb Serial Monitor, Ack/Nack Messages: i.e. as replies to CFG Input Messages.
+  /* Returned after sending a Poll command or periodic auto update */
   uint32_t GpsUart1Baud; // /< [ND], Current GPS Uart1 baud rate --
+  // UBX-MON-IO (0x0A 0x02) I/O Subsystem Status
+  uint32_t rxBytes; // /< [B], Number of bytes ever received
+  uint32_t txBytes; // /< [B], Number of bytes ever sent
+  uint16_t parityErrs; // /< [ms], Number of 100ms timeslots with parity errors
+  uint16_t framingErrs; // /< [ms], Number of 100ms timeslots with framing errors
+  uint16_t overrunErrs; // /< [ms], Number of 100ms timeslots with overrun errors
+  uint16_t breakCond; // /< [ms], Number of 100ms timeslots with break conditions
+  uint8_t rxBusy; // /< [0~1], Flag is receiver is busy
+  uint8_t txBusy; // /< [0~1], Flag is transmitter is busy
+  // UBX-MON-VER (0x0A 0x04) Receiver/Software Version
+  float swVersion; // /< Software Version
+  uint32_t revVersion; // /< Software Version
+  uint32_t hwVersion; // /< Hardware Version
+  float extension1; // /< Extended software information, Protocol version e.g. (14.00)
+  // extension2;    ///< strings e.g. the supported major GNSS ~ GPS;SBAS;GLO;QZSS
+  // UBX-CFG-TP5 (0x06 0x31) Time Pulse Parameters
+  uint16_t antCableDelay; // /< [ns], Antenna cable delay
+  uint32_t freqPeriodL; // /< [Hz], Frequency time when locked to GPS time
+  double dutycycleL; // /< [%], duty cycle locked %
+  // For more INFO see u-blox # / u-blox M# pdf Manual, Receiver Description Including Protocol Specification.
+  // https://www.u-blox.com/sites/default/files/products/documents/u-blox8-M8_ReceiverDescrProtSpec_(UBX-13003221)_Public.pdf
 };
 
 class UBLOX
@@ -168,6 +189,9 @@ class UBLOX
     /**  High level commands, for the user    */
     /******************************************/
     void Poll_GPSbaud_Port1(bool printACK); // Polls the configuration for one I/O Port, I/O Target 0x01=UART1
+    void Poll_CFG_TP5(bool printACK); // Polls CFG-TP5 (0x06 0x31) Poll Time Pulse 0 Parameters
+    void Poll_MON_IO(bool printACK); // Polls MON-I/O Subsystem Status, bytes(received, sent), parity errors, framing errors, overrun errors)
+    void Poll_MON_VER(bool printACK); // Polls MON-VER (0x0A 0x04) Receiver/Software Version
     void Poll_NAV_PVT(); // Polls UBX-NAV-PVT    (0x01 0x07) Navigation Position Velocity Time Solution
     void Poll_NAV_POSLLH(); // Polls UBX-NAV-POSLLH (0x01 0x02) Geodetic Position Solution
     void Poll_NAV_ATT(); // Polls UBX-NAV-ATT (0x01 0x05) Attitude Solution
@@ -184,6 +208,10 @@ class UBLOX
     void SetGPSbaud(uint32_t GPS32baud, bool printACK); // UBX-CFG-PRT  (0x06 0x00)  Set UBLOX GPS Port Configuration Baud rate
     void SetNAV5(uint8_t dynModel, bool printACK); // UBX-CFG-NAV5 (0x06 0x24)  Set Dynamic platform model Navigation Engine Settings (0:portable, 3:pedestrian, Etc)
     void SetRATE(uint16_t measRate, bool printACK); // UBX-CFG-RATE (0x06 0x08)  Set Navigation/Measurement Rate Settings (100ms=10.00Hz, 200ms=5.00Hz, 1000ms=1.00Hz, Etc)
+    void Ena_Dis_MON_IO(bool on_off, bool printACK); // UBX-MON-IO (0x0A 0x02) Ena/Dis periodic auto update I/O Subsystem Status, bytes(received, sent), parity , framing , overrun)
+    void SetCFG_TP5(uint32_t FreqLocked, double DutyLocked, uint16_t antCableDelay, bool printACK); // UBX-CFG-TP5 (0x06 0x31) Time Pulse 0 Parameters
+    // TODO: add pre-processor ifdef
+    // /> void USE_Ucenter(bool u_c); // # experimental Bridge between u-center and teensy UBLOX #
   private:
     uint8_t _bus;
     uint8_t _fpos;
@@ -198,14 +226,19 @@ class UBLOX
     bool _pACK2 = false;
     bool _pACK_RATE = false;
     bool _pACK_NAV5 = false;
+    bool _pACK_TP5 = false;
     bool _UBX_NAV_PVT_ID = false;
     bool _UBX_NAV_POSLLH_ID = false;
     bool _UBX_NAV_ATT_ID = false;
-    bool _UBX_CFG_PRT_ID = false;
     bool _UBX_ACK_ACK_ID = false;
+    bool _UBX_CFG_ID = false;
+    bool _UBX_MON_ID = false;
+    uint8_t _print_I_O = 0;
     uint16_t _MSGpayloadSize;
     uint32_t _GpsUartBaud;
-    static const uint8_t _payloadSize = 100;
+    // # experimental u-center COM #
+    // /> bool _use_ucenter = false; // # u-center #
+    static const uint8_t _payloadSize = 150; // array error: UBX-NAV-SVINFO (0x01 0x30) experimental u-center, needs 230
     uint8_t _gpsPayload[_payloadSize];
     HardwareSerial * _port;
     bool parse();
@@ -213,15 +246,18 @@ class UBLOX
     void ACK_IDs(uint8_t SERa);
     void NAV_IDs(uint8_t SERn);
     void CFG_IDs(uint8_t SERc);
+    // # experimental u-center COM #
+    // /> int rd = 0, wr = 0, n = 0;    // # u-center #
+    // /> uint8_t buffer[_payloadSize]; // # u-center #
     /** High level Command GPS control write operations **/
     // Generate the uBlox command configuration
-    void writeCommand(uint8_t CLASS, uint8_t ID, uint8_t PayloadLength0, uint8_t PayloadLength1, uint8_t Identifier, uint8_t Parameter0, uint8_t Parameter1, uint8_t Parameter2, uint8_t Parameter3, uint8_t reserved0) const;
+    void writeCommand(uint8_t CLASS, uint8_t ID, uint8_t PayloadLength0, uint8_t PayloadLength1, uint8_t Identifier, uint8_t Para0, uint8_t Para1, uint8_t Para2, uint8_t Para3, uint8_t res0, uint32_t P32t0, uint32_t P32t1) const;
     // ### Polling Commands Mechanism, MSG REQUEST ###
-    // All messages that are output by the receiver in a periodic manner (i.e. messages in classes MON, NAV and RXM) can also be polled.
+    // All messages that are output by the receiver in a periodic manner (e.g. messages in classes MON, NAV and RXM) can also be polled.
     uint8_t const _Poll_CFG_PRT[9] =
     {
       0xB5, 0x62, 0x06, 0x00, 0x01, 0x00, 0x01, 0x08, 0x22
-    }; // CFG-PRT (0x06 0x00) Polls the GPS baud configuration for one I/O Port, (I/O Target # MSG) 0x01=UART1
+    }; // UBX-CFG-PRT (0x06 0x00) Polls the GPS baud configuration for one I/O Port, (I/O Target # MSG) 0x01=UART1
     uint8_t const _Poll_NAV_PVT[8] =
     {
       0xB5, 0x62, 0x01, 0x07, 0x00, 0x00, 0x08, 0x19
@@ -235,8 +271,20 @@ class UBLOX
       0xB5, 0x62, 0x01, 0x05, 0x00, 0x00, 0x06, 0x13
     }; // UBX-NAV-ATT (0x01 0x05) Attitude Solution
     // TODO
-    // uint8_t const _Poll_CFG_NAV5[8] =      {0xB5, 0x62, 0x06, 0x24, 0x00, 0x00, 0x2A, 0x84};        // UBX-CFG-NAV5 (0x06 0x24) Navigation Engine Settings
-    // uint8_t const _Poll_CFG_RATE[8] =      {0xB5, 0x62, 0x06, 0x08, 0x00, 0x00, 0x0E, 0x30};        // UBX-CFG-RATE (0x06 0x08) Navigation/Measurement Rate Settings
+    // uint8_t const _Poll_CFG_NAV5[8] =      {0xB5, 0x62, 0x06, 0x24, 0x00, 0x00, 0x2A, 0x84};      // UBX-CFG-NAV5 (0x06 0x24) Navigation Engine Settings
+    // uint8_t const _Poll_CFG_RATE[8] =      {0xB5, 0x62, 0x06, 0x08, 0x00, 0x00, 0x0E, 0x30};      // UBX-CFG-RATE (0x06 0x08) Navigation/Measurement Rate Settings
+    uint8_t const _Poll_MON_IO[8] =
+    {
+      0xB5, 0x62, 0x0A, 0x02, 0x00, 0x00, 0x0C, 0x2E
+    }; // UBX-MON-IO (0x0A 0x02) Poll I/O Subsystem Status
+    uint8_t const _Poll_MON_VER[8] =
+    {
+      0xB5, 0x62, 0x0A, 0x04, 0x00, 0x00, 0x0E, 0x34
+    }; // UBX-MON-VER (0x0A 0x04) Poll Receiver/Software Version
+    uint8_t const _Poll_CFG_TP5[9] =
+    {
+      0xB5, 0x62, 0x06, 0x31, 0x01, 0x00, 0x00, 0x38, 0xE5
+    }; // UBX-CFG-TP5 (0x06 0x31) Poll Time Pulse Parameters
     // ### Periodic auto update ON,OFF command ###
     // CFG-MSG 0x06 0x01
     uint8_t const _Ena_NAV_PVT[11] =
@@ -263,6 +311,8 @@ class UBLOX
     {
       0xB5, 0x62, 0x06, 0x01, 0x03, 0x00, 0x01, 0x02, 0x00, 0x0D, 0x46
     }; // Disable periodic auto update NAV_POSLLH
+    // uint8_t const _Ena_MON_IO[11] =      {0xB5, 0x62, 0x06, 0x01, 0x03, 0x00, 0x0A, 0x02, 0x01, 0x17, 0x62}; // Enable periodic auto update MON_IO (0x0A 0x02)
+    // uint8_t const _Dis_MON_IO[11] =      {0xB5, 0x62, 0x06, 0x01, 0x03, 0x00, 0x0A, 0x02, 0x00, 0x16, 0x61}; // Disable periodic auto update MON_IO (0x0A 0x02)
     // #### NMEA- u-blox Switch OFF ALL NMEA MSGs ####
     // #### ---------------------------------------------------------------------------------------------------- NMEA--Name - Description -------------------------------------------------------- ####
     uint8_t const _Dis_NMEA_GxDTM[11] =
@@ -342,6 +392,8 @@ class UBLOX
     {
       0xB5, 0x62, 0x06, 0x01, 0x03, 0x00, 0xF1, 0x06, 0x00, 0x01, 0x1E
     }; // PUBX 06 (GPS-only on EKF products)
+    uint32_t i_atoi(uint8_t s[], uint8_t ptr); // String helper
+    double modifiedMap(double _x, double _in_min, double _in_max, double _out_min, double _out_max);
     void DEBUG(); // debug print helper
 };
 
